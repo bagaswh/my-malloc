@@ -6,6 +6,11 @@
         "charconv": "c",
         "numbers": "c",
         "errno.h": "c",
-        "stdbool.h": "c"
+        "stdbool.h": "c",
+        "array": "c",
+        "string_view": "c",
+        "format": "c",
+        "initializer_list": "c",
+        "span": "c"
     }
 }
