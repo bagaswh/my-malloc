@@ -34,7 +34,7 @@ ifeq ($(MODE),release)
 else
     TARGET_DIR = $(DEBUG_DIR)
     # CFLAGS_MODE = -O0 -g3 -ggdb3 -DDEBUG -fsanitize=address -fsanitize=undefined -fno-omit-frame-pointer -fno-optimize-sibling-calls -fno-common
-    CFLAGS_MODE = -O0 -g3 -ggdb3 -DDEBUG -fno-omit-frame-pointer -fno-optimize-sibling-calls -fno-common
+    CFLAGS_MODE = -O0 -g3 -ggdb3 -DMYMALLOC_DEBUG -fno-omit-frame-pointer -fno-optimize-sibling-calls -fno-common
     # LDFLAGS_MODE = -fsanitize=address -fsanitize=undefined -rdynamic
     LDFLAGS_MODE = -rdynamic
 endif
