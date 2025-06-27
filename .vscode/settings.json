@@ -3,6 +3,9 @@
         "unistd.h": "c",
         "stdint.h": "c",
         "mymalloc.h": "c",
-        "charconv": "c"
+        "charconv": "c",
+        "numbers": "c",
+        "errno.h": "c",
+        "stdbool.h": "c"
     }
 }

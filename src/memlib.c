@@ -1,12 +1,11 @@
 #define _GNU_SOURCE
 
-#ifndef MEMLIB_H
-#define MEMLIB_H
-
+#include <assert.h>
 #include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -31,7 +30,7 @@ typedef intptr_t iptr;
 
 #define FLAG1_INITIALIZED 0x1
 
-/* Static variables, will be put into .data segment in the process */
+/* Static variables, will be put into .data segment in the process addr space */
 
 static bool flag1 = 0;
 static char *mem_heap;      /* Points to the first byte of heap */
@@ -39,22 +38,42 @@ static char *mem_brk;       /* Points to the last byte of heap plus 1 */
 static char *mem_max_addr;  /* Max legal heap address plus 1 */
 static char *last_fit_addr; /* The address of last fit block */
 
+/* Debugging constants toggles */
+static const bool config_debug =
 #ifdef MYMALLOC_DEBUG
-#include <stdio.h>
-#define mym_debug_prefix "[mym_debug - %s] "
-#define mym_debug0(source, fmt) printf(mym_debug_prefix fmt, source)
-#define mym_debug1(source, fmt, v1) printf(mym_debug_prefix "%s %x\n", source, fmt, v1)
-#define mym_debug_mem_heap(source) mym_debug1("mem_heap: %d\n", source, mem_heap)
-#define mym_debug_mem_brk(source) mym_debug1("mem_brk: %d\n", source, mem_brk)
-#define mym_debug_last_fit_adddr(source) mym_debug1("last_fit_addr: %d\n", source, last_fit_addr)
+    true
 #else
-#define mym_debug_prefix
-#define mym_debug0(fmt, source)
-#define mym_debug1(fmt, source, v1)
-#define mym_debug_mem_brk(source)
-#define mym_debug_mem_heap(source)
-#define mym_debug_last_fit_adddr(source)
+    false
 #endif
+    ;
+
+/* Debugging */
+#define mym_debug_prefix "[mym_debug : %s] "
+
+#define mym_debug0(source, fmt)               \
+	if (unlikely(config_debug)) {             \
+		printf(mym_debug_prefix fmt, source); \
+	}
+
+#define mym_debug1(source, fmt, v1)                    \
+	if (unlikely(config_debug)) {                      \
+		printf(mym_debug_prefix fmt, source, fmt, v1); \
+	}
+
+#define mym_debug_mem_heap(source) mym_debug1(source, "mem_heap: %u\n", mem_heap)
+#define mym_debug_mem_brk(source) mym_debug1(source, "mem_brk: %u\n", mem_brk)
+#define mym_debug_last_fit_addr(source) mym_debug1("last_fit_addr: %u\n", source, last_fit_addr)
+
+/* Assertions */
+#define mym_assert(e)                                            \
+	do {                                                         \
+		if (unlikely(config_debug && !(e))) {                    \
+			printf(                                              \
+			    "<mymalloc>: %s:%d: Failed assertion: \"%s\"\n", \
+			    __FILE__, __LINE__, #e);                         \
+			abort();                                             \
+		}                                                        \
+	} while (0)
 
 static bool INLINE is_initialized() {
 	return (flag1 & FLAG1_INITIALIZED) != 0;
@@ -120,6 +139,7 @@ static int INLINE mm_init() {
 		mem_brk = mem_heap + HEAP_SIZE_DEFAULT;
 		mym_debug_mem_brk("mm_init");
 		mym_debug_mem_heap("mm_init");
+		mym_assert(((mem_brk - mem_heap) == HEAP_SIZE_DEFAULT));
 		last_fit_addr = mem_heap;
 
 		// setup very first block
@@ -169,5 +189,3 @@ void *mm_malloc(size_t size) {
 }
 
 static void INLINE coalesce() {}
-
-#endif /* MEMLIB_H */
