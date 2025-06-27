@@ -30,9 +30,13 @@ typedef intptr_t iptr;
 
 #define FLAG1_INITIALIZED 0x1
 
+/* Forward declarations */
+static u32 INLINE get_block_size(u32 hdr);
+static bool INLINE is_free(u32 hdr);
+
 /* Static variables, will be put into .data segment in the process addr space */
 
-static bool flag1 = 0;
+static u8 flag1 = 0;
 static char *mem_heap;      /* Points to the first byte of heap */
 static char *mem_brk;       /* Points to the last byte of heap plus 1 */
 static char *mem_max_addr;  /* Max legal heap address plus 1 */
@@ -47,19 +51,32 @@ static const bool config_debug =
 #endif
     ;
 
+static const bool debug_list_all_blocks =
+#ifdef MYMALLOC_DEBUG
+    true
+#else
+    false
+#endif
+    ;
+
 /* Debugging */
 #define mym_debug_prefix "[mym_debug : %s] "
 
-#define mym_debug0(source, fmt)               \
-	if (unlikely(config_debug)) {             \
-		printf(mym_debug_prefix fmt, source); \
-	}
+#define mym_debug0(source, fmt)                   \
+	do {                                          \
+		if (unlikely(config_debug)) {             \
+			printf(mym_debug_prefix fmt, source); \
+		}                                         \
+	} while (0)
 
-#define mym_debug1(source, fmt, v1)                    \
-	if (unlikely(config_debug)) {                      \
-		printf(mym_debug_prefix fmt, source, fmt, v1); \
-	}
+#define mym_debug1(source, fmt, v1)                   \
+	do {                                              \
+		if (unlikely(config_debug)) {                 \
+			printf(mym_debug_prefix fmt, source, v1); \
+		}                                             \
+	} while (0)
 
+#define mym_debug_heap_size(source) mym_debug1(source, "heap_size: %u\n", mem_brk - mem_heap)
 #define mym_debug_mem_heap(source) mym_debug1(source, "mem_heap: %u\n", mem_heap)
 #define mym_debug_mem_brk(source) mym_debug1(source, "mem_brk: %u\n", mem_brk)
 #define mym_debug_last_fit_addr(source) mym_debug1("last_fit_addr: %u\n", source, last_fit_addr)
@@ -74,6 +91,34 @@ static const bool config_debug =
 			abort();                                             \
 		}                                                        \
 	} while (0)
+
+static void INLINE mym_debug_list_all_blocks() {
+	if (unlikely(config_debug)) {
+		u32 block_n = 0;
+		printf("## All blocks list\n");
+		for (char *ptr = mem_heap; ptr < mem_brk;) {
+			u32 hdr;
+			memcpy(&hdr, ptr, sizeof(u32));
+			u32 block_size = get_block_size(hdr);
+			printf("\n");
+			printf("## Block %d ##\n", block_n);
+			printf("- Size: %u\n", block_size);
+			printf("- Start addr: %u\n", ptr);
+			printf("- End addr: %u\n", ptr + block_size);
+			if (is_free(hdr)) {
+				printf("- Free\n");
+			} else {
+				printf("- Allocated\n");
+				printf("- Payload size: %u\n", block_size - BLOCK_HEADER_SIZE);
+			}
+			block_n++;
+			if (block_n > 2) {
+				return;
+			}
+			ptr += block_size;
+		}
+	}
+}
 
 static bool INLINE is_initialized() {
 	return (flag1 & FLAG1_INITIALIZED) != 0;
@@ -91,7 +136,7 @@ static bool INLINE is_free(u32 hdr) {
 	return (hdr & 0x1) == 0x0;
 }
 
-static size_t INLINE get_block_size(u32 hdr) {
+static u32 INLINE get_block_size(u32 hdr) {
 	return hdr & 0xFFFFFFF8;  // turn off lowest bit
 }
 
@@ -116,7 +161,7 @@ static void INLINE zero_fill_footer(u32 size, void *hdrptr) {
 	memset((void *)footaddr, 0, BLOCK_FOOTER_SIZE);
 }
 
-static void INLINE write_block_hdr(u32 size, void *hdrptr, bool with_footer, bool allocated) {
+static void INLINE write_block_hdr(void *hdrptr, u32 size, bool with_footer, bool allocated) {
 	if (allocated) {
 		size = set_hdr_as_allocated(size);
 	} else {
@@ -140,23 +185,43 @@ static int INLINE mm_init() {
 		mym_debug_mem_brk("mm_init");
 		mym_debug_mem_heap("mm_init");
 		mym_assert(((mem_brk - mem_heap) == HEAP_SIZE_DEFAULT));
+		mym_debug_heap_size("mm_init");
 		last_fit_addr = mem_heap;
 
 		// setup very first block
-		write_block_hdr(align_8(HEAP_SIZE_DEFAULT), mem_heap, true, false);
+		write_block_hdr(mem_heap, align_8(HEAP_SIZE_DEFAULT), true, false);
 
 		flag1 |= FLAG1_INITIALIZED;
 	}
 	return 0;
 }
 
-static void INLINE split(void *block_start_ptr, u32 orig_block_size, u32 alloc_block_size) {
+static void INLINE split(char *block_start_ptr, u32 orig_block_size, u32 alloc_block_size) {
 	/* Go to the next block after alloc_block_size, and put a header in there */
 	u32 new_block_size = orig_block_size - alloc_block_size;
+	char *next_block_hdr_ptr = (void *)((uptr)block_start_ptr + (uptr)alloc_block_size);
 	write_block_hdr(
+	    next_block_hdr_ptr, /* Go the the next block */
 	    new_block_size,
-	    block_start_ptr + alloc_block_size, /* Go the the next block */
 	    true, false);
+
+	/* Write current block header to change size */
+	u32 curr_block_new_size = alloc_block_size;
+	write_block_hdr(
+	    block_start_ptr,
+	    curr_block_new_size,
+	    false, /* No footer since it's now allocated */
+	    true);
+
+#ifdef MYM_DEBUG_ENABLED
+	u32 cb_hdr;
+	memcpy(&cb_hdr, block_start_ptr, BLOCK_HEADER_SIZE);
+	mym_debug1("split", "curr block header after split: %u\n", cb_hdr);
+
+	u32 nb_hdr;
+	memcpy(&nb_hdr, next_block_hdr_ptr, BLOCK_HEADER_SIZE);
+	mym_debug1("split", "next block header: %u\n", nb_hdr);
+#endif
 }
 
 void *mm_malloc(size_t size) {
@@ -178,8 +243,9 @@ void *mm_malloc(size_t size) {
 			hdr = set_hdr_as_allocated(hdr);
 			memcpy(ptr, &hdr, sizeof(hdr));
 			last_fit_addr = ptr;
-			zero_fill_footer(block_size, ptr); /* Remove footer */
 			split(ptr, block_size, asize);
+			// zero_fill_footer(block_size, ptr); /* Remove footer */
+			mym_debug_list_all_blocks();
 			return ptr + BLOCK_HEADER_SIZE;
 		}
 		ptr += block_size;
