@@ -4,9 +4,6 @@
 
 ### [27th June 2025]
 
-- I found a SEGV due to block size crossing epilogue header. 
-
-    I added a 4 byte epilogue header at the end of the heap (mem_brk-4). 
     
 
 ## Invariants
