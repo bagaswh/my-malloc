@@ -392,8 +392,8 @@ static void INLINE split(char *block_start_ptr, u32 orig_block_size, u32 alloc_b
 #endif
 }
 
-static char INLINE *try_place(char *ptr, u32 hdr, u32 block_size, size_t asize) {
-	if (is_free(hdr) && (block_size >= asize)) {
+static char INLINE *place(char *ptr, u32 hdr, u32 block_size, size_t asize) {
+	if (block_size >= asize) {
 		hdr = set_hdr_as_allocated(hdr);
 		memcpy(ptr, &hdr, sizeof(hdr));
 		last_fit_addr = ptr;
@@ -414,16 +414,22 @@ void *mm_malloc(size_t size) {
 
 	char *ptr = last_fit_addr;
 	char *prev_hdr_ptr;
+	bool prev_block_is_free = false;
 	const size_t asize = align_8(BLOCK_HEADER_SIZE + size);
 	for (;;) {
 		for (; ptr < VALID_BLOCK_ADDR_HI_BOUND;) {
 			u32 hdr;
 			memcpy(&hdr, ptr, sizeof(u32));
 			u32 block_size = get_block_size(hdr);
-			char *block_ptr = try_place(ptr, hdr, block_size, asize);
-			if (block_ptr) {
-				mym_debug_list_all_blocks();
-				return (void *)block_ptr;
+			if (is_free(hdr)) {
+				prev_block_is_free = true;
+				char *block_ptr = place(ptr, hdr, block_size, asize);
+				if (block_ptr) {
+					mym_debug_list_all_blocks();
+					return (void *)block_ptr;
+				}
+			} else {
+				prev_block_is_free = false;
 			}
 			prev_hdr_ptr = ptr;
 			ptr += block_size;
@@ -434,8 +440,10 @@ void *mm_malloc(size_t size) {
 			errno = ENOMEM;
 			return NULL;
 		}
-		/* Backtrack to the previously free block */
-		ptr = prev_hdr_ptr;
+		if (prev_block_is_free) {
+			/* Backtrack to the previously free block */
+			ptr = prev_hdr_ptr;
+		}
 	}
 }
 
