@@ -17,9 +17,16 @@ typedef int64_t i64;
 typedef uintptr_t uptr;
 typedef intptr_t iptr;
 
-#define HEAP_SIZE_DEFAULT (iptr)(4096)
+#define KiB 1024
+#define MiB 1024 * KiB
+
+#define HEAP_SIZE_DEFAULT (iptr)(4 * KiB)
 #define BRK_FAILED (void *)-1
 #define GROW_HEAP_FAILED (void *)-1
+/*
+    We grow heap size by 2x when the current heap size is less than this value.
+*/
+#define GROW_HEAP_DOUBLE_MAX_HEAP_SIZE 16 * KiB
 
 /*
     Reserved 8 bytes put at the very last of the heap, to indicate whether the last block
@@ -37,6 +44,11 @@ typedef intptr_t iptr;
 #define BLOCK_HEADER_SIZE 4
 #define BLOCK_FOOTER_SIZE BLOCK_HEADER_SIZE
 
+/*
+    High bound for valid block address.
+*/
+#define VALID_BLOCK_ADDR_HI_BOUND mem_brk - HEAP_EPILOGUE_HEADER_SIZE
+
 #define INLINE __attribute__((always_inline))
 #define NOINLINE __attribute__((noinline))
 
@@ -52,6 +64,7 @@ static bool INLINE is_allocated(u32 hdr);
 static bool INLINE is_prev_block_allocated(u32 hdr);
 static u32 INLINE set_hdr_as_prev_allocated(u32 hdr);
 static void INLINE *grow_heap(size_t needs, char *last_block_ptr);
+static u64 determine_heap_incr();
 
 /* Static variables, will be put into .data segment in the process addr space */
 
@@ -61,7 +74,10 @@ static char *mem_brk = 0;       /* Points to the last byte of heap plus 1 */
 static char *mem_max_addr;      /* Max legal heap address plus 1 */
 static char *last_fit_addr = 0; /* The address of last fit block */
 
-#define HEAP_SIZE() (size_t)(mem_brk - mem_heap)
+#define get_heap_size() (size_t)(mem_brk - mem_heap)
+
+#define max(a, b) a > b ? a : b
+#define min(a, b) a < b ? a : b
 
 /* Debugging constants toggles */
 static const bool config_debug =
@@ -104,7 +120,7 @@ static const bool debug_list_all_blocks =
 		}                                                                     \
 	} while (0)
 
-#define mym_debug_heap_size(source) mym_debug1(source, "heap_size: %u\n", HEAP_SIZE())
+#define mym_debug_heap_size(source) mym_debug1(source, "heap_size: %u\n", get_heap_size())
 #define mym_debug_mem_heap(source) mym_debug1(source, "mem_heap: %p\n", mem_heap)
 #define mym_debug_mem_brk(source) mym_debug1(source, "mem_brk: %p\n", mem_brk)
 #define mym_debug_last_fit_addr(source) mym_debug1("last_fit_addr: %p\n", source, last_fit_addr)
@@ -139,12 +155,36 @@ static const bool debug_list_all_blocks =
 
 #define mym_assert_addr_within_bound(addr) mym_assert((addr >= mem_heap) && (addr < mem_brk))
 
+static void INLINE print_block_info(void *hdrptr) {
+	u32 hdr;
+	memcpy(&hdr, hdrptr, sizeof(hdr));
+	u32 block_size = get_block_size(hdr);
+
+	bool _is_free = is_free(hdr);
+
+	if (is_prev_block_allocated(hdr)) {
+		printf("- Prev block is allocated\n");
+	}
+
+	if (_is_free) {
+		printf("- Free\n");
+	} else {
+		printf("- Allocated\n");
+		printf("- Payload size: %u\n", block_size - BLOCK_HEADER_SIZE);
+	}
+
+	printf("- Size: %u\n", block_size);
+	printf("- Start addr: %u\n", hdrptr);
+	printf("- End addr: %u\n", hdrptr + block_size);
+}
+
 static void INLINE mym_debug_list_all_blocks() {
 	if (unlikely(config_debug)) {
 		u32 block_n = 0;
 		mym_debug_heap_size("mym_debug_list_all_blocks");
-		printf("## All blocks list\n");
-		for (char *ptr = mem_heap; ptr < mem_brk - HEAP_EPILOGUE_HEADER_SIZE;) {
+		printf("\n# All blocks list\n");
+		char *ptr = mem_heap;
+		for (; ptr < VALID_BLOCK_ADDR_HI_BOUND;) {
 			u32 hdr;
 			memcpy(&hdr, ptr, sizeof(u32));
 			u32 block_size = get_block_size(hdr);
@@ -155,8 +195,8 @@ static void INLINE mym_debug_list_all_blocks() {
 				printf("- Prev block is allocated\n");
 			}
 			printf("- Size: %u\n", block_size);
-			printf("- Start addr: %u\n", ptr);
-			printf("- End addr: %u\n", ptr + block_size);
+			printf("- Start addr: %p\n", ptr);
+			printf("- End addr: %p\n", ptr + block_size);
 			if (_is_free) {
 				printf("- Free\n");
 			} else {
@@ -166,6 +206,10 @@ static void INLINE mym_debug_list_all_blocks() {
 			block_n++;
 			ptr += block_size;
 		}
+		printf("\n## Epilogue Header\n");
+		u64 epilogue;
+		memcpy(&epilogue, ptr, sizeof(epilogue));
+		printf("- Value: %u\n\n", epilogue);
 	}
 }
 
@@ -242,35 +286,41 @@ static int INLINE mm_init() {
 		if (new_heap == GROW_HEAP_FAILED) {
 			return -1;
 		}
-		mym_assert(HEAP_SIZE() == heap_size);
+		mym_assert(get_heap_size() == heap_size);
 		last_fit_addr = mem_heap;
-
-		/* Setup very first block */
-		write_block_hdr(mem_heap, align_8(heap_size - HEAP_EPILOGUE_HEADER_SIZE), true, false);
 
 		flag1 |= FLAG1_INITIALIZED;
 	}
 	return 0;
 }
 
-static void INLINE *grow_heap(size_t needs, char *last_block_ptr) {
+static u64 determine_heap_incr() {
+	if (get_heap_size() < GROW_HEAP_DOUBLE_MAX_HEAP_SIZE) {
+		return get_heap_size() * 2;
+	}
+	return (3 * GROW_HEAP_DOUBLE_MAX_HEAP_SIZE) >> 2;
+}
+
+static void INLINE *grow_heap(size_t needs, char *last_block_hdr_ptr) {
+	mym_debug1("grow_heap", "needs to grow heap to serve %d bytes allocation request\n", needs);
+
 	const char *old_brk = mem_brk;
-	u32 sbrk_incr = needs;
+	u32 sbrk_incr = max(needs, determine_heap_incr());
+	mym_debug1("grow_heap", "sbrk_incr: %d\n", sbrk_incr);
 
 	/* When growing heap, it needs to coalesce with the preceeding free block */
 	u64 epilogue_hdr = 0x0;
 	u32 last_block_size;
-	if (likely(HEAP_SIZE() > 0 && last_block_ptr > 0)) {
-		u32 last_block_footer;
-		memcpy(&last_block_footer, last_block_ptr, sizeof(last_block_footer));
+	if (likely(get_heap_size() > 0 && last_block_hdr_ptr > 0)) {
+		u32 last_block_hdr;
+		memcpy(&last_block_hdr, last_block_hdr_ptr, sizeof(last_block_hdr));
 		/* We'll rely that the caller will provide us with a valid last block footer, so no need to check anything */
-		if (is_allocated(last_block_footer)) {
+		if (is_allocated(last_block_hdr)) {
 			epilogue_hdr = 0x1;
 		} else {
-			last_block_size = get_block_size(last_block_footer);
-			sbrk_incr = needs - last_block_size;
-			last_block_size += sbrk_incr - HEAP_EPILOGUE_HEADER_SIZE;
-			write_block_hdr(last_block_ptr, last_block_size, true, false);
+			last_block_size = get_block_size(last_block_hdr);
+			last_block_size += sbrk_incr;
+			mym_debug1("grow_heap", "last_block_size after sbrk_incr: %d\n", last_block_size);
 		}
 	}
 
@@ -280,10 +330,27 @@ static void INLINE *grow_heap(size_t needs, char *last_block_ptr) {
 		return GROW_HEAP_FAILED;
 	}
 
+	mym_debug2("grow_heap", "prev_brk: %p; mem_brk before increment: %p\n", prev_brk, mem_brk);
+
 	if (mem_heap == 0) {
 		mem_heap = prev_brk;
 	}
 	mem_brk = prev_brk + sbrk_incr;
+
+	if (last_block_hdr_ptr > 0 && epilogue_hdr == 0x0) {
+		/* Coalesce prev free block to the newly expanded heap */
+		write_block_hdr(last_block_hdr_ptr, last_block_size, true, false);
+		mym_debug0("grow_heap", "\n\nnew block:\n");
+		print_block_info(last_block_hdr_ptr);
+	} else {
+		/* Otherwise create new block */
+		write_block_hdr(prev_brk, align_8(sbrk_incr - HEAP_EPILOGUE_HEADER_SIZE), true, false);
+		mym_debug0("grow_heap", "\n\nnew block:\n");
+		print_block_info(prev_brk);
+	}
+	printf("\n");
+
+	// mym_debug_list_all_blocks();
 
 	/* Write epilogue header at the end of the heap */
 	memcpy((void *)mem_brk - HEAP_EPILOGUE_HEADER_SIZE, &epilogue_hdr, sizeof(epilogue_hdr));
@@ -331,7 +398,6 @@ static char INLINE *try_place(char *ptr, u32 hdr, u32 block_size, size_t asize) 
 		memcpy(ptr, &hdr, sizeof(hdr));
 		last_fit_addr = ptr;
 		split(ptr, block_size, asize);
-		mym_debug_list_all_blocks();
 		return ptr + BLOCK_HEADER_SIZE;
 	}
 	return 0;
@@ -343,30 +409,34 @@ void *mm_malloc(size_t size) {
 		return NULL;
 	}
 
-	mym_debug_list_all_blocks();
-
 	/* Traverse from the start of the heap until program break,
 	finding block with next fit policy */
 
-	// char *ptr = last_fit_addr;
-	// char *prev_hdr_ptr;
-	// const size_t asize = align_8(BLOCK_HEADER_SIZE + size);
-	// // for (;;) {
-	// // for (; ptr < mem_brk - HEAP_EPILOGUE_HEADER_SIZE;) {
-	// u32 hdr;
-	// memcpy(&hdr, ptr, sizeof(u32));
-	// u32 block_size = get_block_size(hdr);
-	// char *block_ptr = try_place(ptr, hdr, block_size, asize);
-	// if (block_ptr) {
-	// 	return (void *)block_ptr;
-	// }
-	// prev_hdr_ptr = ptr;
-	// ptr += block_size;
-	// }
+	char *ptr = last_fit_addr;
+	char *prev_hdr_ptr;
+	const size_t asize = align_8(BLOCK_HEADER_SIZE + size);
+	for (;;) {
+		for (; ptr < VALID_BLOCK_ADDR_HI_BOUND;) {
+			u32 hdr;
+			memcpy(&hdr, ptr, sizeof(u32));
+			u32 block_size = get_block_size(hdr);
+			char *block_ptr = try_place(ptr, hdr, block_size, asize);
+			if (block_ptr) {
+				mym_debug_list_all_blocks();
+				return (void *)block_ptr;
+			}
+			prev_hdr_ptr = ptr;
+			ptr += block_size;
+		}
 
-	/* We haven't found free block, need to grow the heap */
-	// grow_heap(asize, prev_hdr_ptr);
-	// }
+		/* We haven't found free block, need to grow the heap */
+		if (grow_heap(asize, prev_hdr_ptr) == GROW_HEAP_FAILED) {
+			errno = ENOMEM;
+			return NULL;
+		}
+		/* Backtrack to the previously free block */
+		ptr = prev_hdr_ptr;
+	}
 }
 
 static void INLINE coalesce() {}
