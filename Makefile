@@ -33,10 +33,10 @@ ifeq ($(MODE),release)
     LDFLAGS_MODE = -O3 -flto
 else
     TARGET_DIR = $(DEBUG_DIR)
-    # CFLAGS_MODE = -O0 -g3 -ggdb3 -DDEBUG -fsanitize=address -fsanitize=undefined -fno-omit-frame-pointer -fno-optimize-sibling-calls -fno-common
-    CFLAGS_MODE = -O0 -g3 -ggdb3 -DMYMALLOC_DEBUG -fno-omit-frame-pointer -fno-optimize-sibling-calls -fno-common
-    # LDFLAGS_MODE = -fsanitize=address -fsanitize=undefined -rdynamic
-    LDFLAGS_MODE = -rdynamic
+    CFLAGS_MODE = -O0 -g3 -ggdb3 -DMYMALLOC_DEBUG -fsanitize=address -fsanitize=undefined -fno-omit-frame-pointer -fno-optimize-sibling-calls -fno-common
+    # CFLAGS_MODE = -O0 -g3 -ggdb3 -DMYMALLOC_DEBUG -fno-omit-frame-pointer -fno-optimize-sibling-calls -fno-common
+    LDFLAGS_MODE = -fsanitize=address -fsanitize=undefined -rdynamic
+    # LDFLAGS_MODE = -rdynamic
 endif
 
 # Common compiler flags
@@ -145,8 +145,8 @@ clean:
 	$(RM) $(SRC_DIR)/*.o  # Clean any leftover object files in src
 
 # Development helpers with better debugging
-valgrind-test: $(RELEASE_DIR)/$(TEST_TARGET)
-	valgrind --tool=memcheck --leak-check=full --show-leak-kinds=all --track-origins=yes ./$(RELEASE_DIR)/$(TEST_TARGET)
+valgrind-test: $(TARGET_DIR)/$(TEST_TARGET)
+	ulimit -s 8192 && valgrind --tool=memcheck --leak-check=full --show-leak-kinds=all --track-origins=yes ./$(TARGET_DIR)/$(TEST_TARGET)
 
 gdb-test: $(DEBUG_DIR)/$(TEST_TARGET)
 	gdb -ex "set environment ASAN_OPTIONS=abort_on_error=1:symbolize=1" ./$(DEBUG_DIR)/$(TEST_TARGET)
